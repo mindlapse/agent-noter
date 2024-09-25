@@ -1,12 +1,11 @@
 from flask import Flask, request, jsonify
 from langchain_anthropic import ChatAnthropic
-from langchain.tools import tool;
-from notes import NoteService
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
-import os
-
+from tools import NoterTools
+from notes import NoterService
+from db import DB
+from llm import NoterLLM
+from graph import create_graph
 load_dotenv()
 
 MODEL = "claude-3-haiku-20240307"
@@ -22,57 +21,55 @@ llm = ChatAnthropic(
     # other params...
 )
 
-note_service = NoteService()
-db_username = os.environ.get("POSTGRES_USER")
-db_password = os.environ.get("POSTGRES_PASSWORD")
-db_host = os.environ.get("POSTGRES_HOST")
-db_port = os.environ.get("POSTGRES_PORT")
-db_name = os.environ.get("POSTGRES_DBNAME")
+db = DB()
+noter_svc = NoterService()
+noter_tools = NoterTools(noter_svc, db)
+noter_llm = NoterLLM(noter_tools.get_all_tools())
+graph = create_graph(noter_llm)
 
-db_url = f"postgresql://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}"
-engine = create_engine(db_url)
-Session = sessionmaker(bind=engine)
+# llm_with_tools = llm.bind_tools([
+#     create_note_tool,
+#     list_notes_tool,
+#     delete_note_tool,
+# ])
 
-
-@tool
-def create_note(user: str, note: str, folder: str):
-    """Creates the given note for the user in a folder."""
-    print("Creating note...")
-    session = Session() 
-    id = note_service.create_note(session, user, folder, note)
-    session.commit();
-    session.close();
-    return {
-        "note_id": id,
-    }
-
-llm_with_tools = llm.bind_tools([create_note])
+# def get_system_prompt():
+#     return """
+#     You are Noter, a powerful LLM that manages notes for users in folders.
+#     If the folder is not known, use the 'default' folder.
+#     """
 
 @app.route('/', methods=['POST'])
 def prompt():
     request_data = request.get_json()
 
-    messages = [
-        (
-            "system",
-            """
-            You are Noter, a powerful LLM that manages notes for users in folders.
-            If the folder is not known, use the 'default' folder.
-            """
-            ,
-        ),
-        ("human", request_data["prompt"]),
-    ]
-    ai_msg = llm_with_tools.invoke(messages)
+    user = request.get_json().get("user")
+    # user = request_data["user"]
+    if user is None:
+        return jsonify({ "error": "Must provide 'user' and 'prompt'." })
 
-    print(ai_msg)
-    if ai_msg.tool_calls is not None:
-        tool_call = ai_msg.tool_calls[0]
-        if tool_call["name"] == "create_note":
-            result = create_note.invoke(tool_call["args"])
-            print(result)
+    state = graph.invoke({
+        "user_prompt": request_data["prompt"],
+        "tool_call": None,
+        "result": None,
+    })
+
+    print("Resulting state", state)
+
+    # print(ai_msg)
+    # if ai_msg.tool_calls is not None:
+    #     tool_call = ai_msg.tool_calls[0]
+    #     if tool_call["name"] == "create_note":
+    #         result = create_note_tool.invoke(tool_call["args"])
+    #         print(result)
+    #     if tool_call["name"] == "list_notes":
+    #         result = list_notes_tool.invoke(tool_call["args"])
+    #         print(result)
+    #     if tool_call["name"] == "delete_note":
+    #         result = delete_note_tool.invoke(tool_call["args"])
+    #         print(result)
             
-    return jsonify({ "reply": ai_msg.content })
+    return jsonify({ "state": state })
 
 
 if __name__ == '__main__':
